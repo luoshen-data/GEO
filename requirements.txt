@@ -1,6 +1,6 @@
-tqdm
-openai<1.0.0
+openai
 beautifulsoup4
 readabilipy
 trafilatura
+nltk
 datasets

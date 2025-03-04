@@ -3,7 +3,9 @@ import math
 import itertools
 from glob import glob
 import time
-import openai
+from openai import OpenAI
+
+client = OpenAI()
 
 PROMPT_TEMPLATE = "<s>[INST] <<SYS>>\n{system_prompt}\n<</SYS>>\n\n{user_msg}[/INST]"
 
@@ -26,31 +28,108 @@ def get_num_words(line):
 
 def extract_citations_new(text):
     def ecn(sentence):
-        citation_pattern = r'\[[^\w\s]*\d+[^\w\s]*\]'
+        try:
+            citation_pattern = r'\[[^\w\s]*\d+[^\w\s]*\]'
+            citations = re.findall(citation_pattern, sentence)
+            
+            if not citations:
+                return []
+                
+            result = []
+            for citation in citations:
+                try:
+                    digits = re.findall(r'\d+', citation)
+                    if digits:
+                        result.append(int(digits[0]))
+                except (ValueError, IndexError) as e:
+                    print(f"Error parsing citation '{citation}': {str(e)}")
+            return result
+        except Exception as e:
+            print(f"Error in citation extraction: {str(e)}")
+            return []
 
-        return [int(re.findall(r'\d+', citation)[0]) for citation in re.findall(citation_pattern, sentence)]
+    try:
+        if text is None:
+            print("Warning: Received None text in extract_citations_new")
+            return []
+            
+        paras = re.split(r'\n\n', text)
 
-    paras = re.split(r'\n\n', text)
+        # Split each paragraph into sentences
+        sentences = []
+        for p in paras:
+            try:
+                sentences.append(nltk.sent_tokenize(p))
+            except Exception as e:
+                print(f"Error tokenizing paragraph: {str(e)}")
+                sentences.append([p])  # Use the whole paragraph as a single sentence
 
-    # Split each paragraph into sentences
-    sentences = [nltk.sent_tokenize(p) for p in paras]
-
-    # Split each sentence into words
-    words = [[(nltk.word_tokenize(s), s, ecn(s)) for s in sentence] for sentence in sentences]
-    return words
+        # Split each sentence into words
+        words = []
+        for sentence in sentences:
+            sentence_words = []
+            for s in sentence:
+                try:
+                    tokens = nltk.word_tokenize(s)
+                    citations = ecn(s)
+                    sentence_words.append((tokens, s, citations))
+                except Exception as e:
+                    print(f"Error processing sentence: {str(e)}")
+                    # Add an empty entry to maintain structure
+                    sentence_words.append(([], s, []))
+            words.append(sentence_words)
+            
+        return words
+    except Exception as e:
+        print(f"Error in extract_citations_new: {str(e)}")
+        return []
 
 def impression_wordpos_count_simple(sentences, n = 5, normalize=True):
-    sentences = list(itertools.chain(*sentences))
-    scores = [0 for _ in range(n)]
-    for i, sent in enumerate(sentences):
-        for cit in sent[2]:
-            score = get_num_words(sent[0])
-            score *= math.exp(-1 * i / (len(sentences)-1)) if len(sentences)>1 else 1
-            score /= len(sent[2])
+    try:
+        if not sentences:
+            print("Warning: Empty sentences in impression_wordpos_count_simple")
+            return [1/n for _ in range(n)] if normalize else [0 for _ in range(n)]
+            
+        sentences = list(itertools.chain(*sentences))
+        scores = [0 for _ in range(n)]
+        
+        for i, sent in enumerate(sentences):
+            try:
+                if not isinstance(sent, tuple) or len(sent) < 3:
+                    continue
+                    
+                words, _, citations = sent
+                
+                if not citations:
+                    continue
+                    
+                for cit in citations:
+                    try:
+                        if not isinstance(cit, int) or cit <= 0 or cit > n:
+                            print(f"Citation out of range: {cit}")
+                            continue
+                            
+                        score = get_num_words(words)
+                        score *= math.exp(-1 * i / (len(sentences)-1)) if len(sentences)>1 else 1
+                        score /= len(citations) if len(citations) > 0 else 1
 
-            try: scores[cit-1] += score
-            except: print(f'Citation Hallucinated: {cit}')
-    return [x/sum(scores) for x in scores] if normalize and sum(scores)!=0 else [1/n for _ in range(n)] if normalize else scores
+                        scores[cit-1] += score
+                    except Exception as e:
+                        print(f"Error processing citation {cit}: {str(e)}")
+            except Exception as e:
+                print(f"Error processing sentence at position {i}: {str(e)}")
+                
+        if normalize:
+            total = sum(scores)
+            if total > 0:
+                return [x/total for x in scores]
+            else:
+                return [1/n for _ in range(n)]
+        else:
+            return scores
+    except Exception as e:
+        print(f"Error in impression_wordpos_count_simple: {str(e)}")
+        return [1/n for _ in range(n)] if normalize else [0 for _ in range(n)]
 
 def impression_word_count_simple(sentences, n = 5, normalize=True):
     sentences = list(itertools.chain(*sentences))
@@ -184,8 +263,8 @@ def impression_subjective_impression(sentences, query, n = 5, normalize = True, 
         cur_prompt = prompt.format(query = query, answer = sentences)
         while True:
             try:
-                _response = openai.Completion.create(
-                    model='gpt-3.5-turbo-instruct',
+                _response = client.completions.create(
+                    model='chatgpt-4o-latest',
                     prompt = cur_prompt,
                     temperature=0.0,
                     max_tokens=3,
