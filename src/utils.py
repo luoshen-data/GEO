@@ -342,7 +342,18 @@ def get_answer(query, summaries = None, n = 5, num_completions = 1, cache_idx = 
         if summaries is None:
             cache[query] = [{'sources': search_results['sources'], 'responses': [answers]}]
         else:
-            cache[query] = [{'sources': [{'summary' : x} for x in summaries], 'responses': [answers]}]
+            # Fix: Instead of creating minimal sources, use the standard format
+            # Original: cache[query] = [{'sources': [{'summary' : x} for x in summaries], 'responses': [answers]}]
+            # Generate proper source entries with all fields
+            proper_sources = []
+            for i, summary in enumerate(summaries):
+                proper_sources.append({
+                    'summary': summary,
+                    'source': f"Source {i+1}",  # Default value if no real source is available
+                    'url': f"Source URL {i+1}",  # Default value if no URL is available
+                    'text': f"Summary: {summary}"  # Default format used in search_handler
+                })
+            cache[query] = [{'sources': proper_sources, 'responses': [answers]}]
     else:
         flag = False
         for source in cache[query]:
@@ -356,7 +367,24 @@ def get_answer(query, summaries = None, n = 5, num_completions = 1, cache_idx = 
             if summaries is None:
                 cache[query].append({'sources': search_results['sources'], 'responses': [answers]})
             else:
-                cache[query].append({'sources': [{'summary' : x, 'source' : y} for x, y in zip(summaries, cache[query][0]['sources'])], 'responses': [answers]})
+                # Fix: Ensure full source information is maintained
+                # Original: cache[query].append({'sources': [{'summary' : x, 'source' : y} for x, y in zip(summaries, cache[query][0]['sources'])], 'responses': [answers]})
+                
+                # First check if cache[query][0]['sources'] has complete source information
+                existing_sources = cache[query][0]['sources']
+                proper_sources = []
+                
+                for i, (summary, existing) in enumerate(zip(summaries, existing_sources)):
+                    source_entry = {
+                        'summary': summary,
+                        # Use existing source information if available, otherwise use defaults
+                        'source': existing.get('source', f"Source {i+1}"),
+                        'url': existing.get('url', f"Source URL {i+1}"),
+                        'text': existing.get('text', f"Summary: {summary}")
+                    }
+                    proper_sources.append(source_entry)
+                
+                cache[query].append({'sources': proper_sources, 'responses': [answers]})
     if write_to_cache:
         json.dump(cache, open(CACHE_FILE, 'w'), indent=2)
 

@@ -185,6 +185,13 @@ if __name__ == '__main__':
 	test_count = 0
 	max_samples = 100  # Limit to 100 samples
 	
+	# Initialize data structures for aggregation
+	all_results = []
+	all_method_names = list(GEO_METHODS.keys())
+	successful_cases = 0
+	method_success_counts = {method: 0 for method in all_method_names}
+	successful_improvements_by_method = {method: [] for method in all_method_names}
+	
 	for i, k in enumerate(dataset['test']):
 		try:
 			print(f"\nProcessing item {i}: '{k['query']}'")
@@ -230,6 +237,23 @@ if __name__ == '__main__':
 				
 				if len(improvements) > 0:
 					print(improvements, positive_improvements)
+					
+					# Store results for aggregation
+					result_data = {
+						'query': k['query'],
+						'improvements': improvements,
+						'positive_improvements': positive_improvements,
+						'sugg_idx': sugg_idx
+					}
+					all_results.append(result_data)
+					successful_cases += 1
+					
+					# Track successful improvements by method
+					for i, method_name in enumerate(all_method_names):
+						if i < len(improvements):
+							successful_improvements_by_method[method_name].append(improvements[i])
+							method_success_counts[method_name] += 1
+					
 				else:
 					print("Skipping due to empty results")
 					
@@ -257,3 +281,66 @@ if __name__ == '__main__':
 			if test_count >= max_samples:
 				print(f"\nReached limit of {max_samples} samples. Stopping.")
 				break
+	
+	# Display aggregate statistics
+	print("\n" + "="*50)
+	print("AGGREGATE RESULTS ACROSS ALL TEST CASES")
+	print("="*50)
+	
+	if successful_cases == 0:
+		print("No successful test cases to aggregate.")
+	else:
+		print(f"Total test cases processed: {test_count}")
+		print(f"Successfully processed cases: {successful_cases} ({successful_cases/test_count*100:.2f}%)")
+		print("\nPER-METHOD STATISTICS:")
+		print("-"*30)
+		
+		# Calculate average improvement for each method
+		for method_name in all_method_names:
+			improvements = successful_improvements_by_method[method_name]
+			success_count = method_success_counts[method_name]
+			
+			if success_count > 0:
+				# Convert list of improvements to numpy array for calculations
+				improvements_array = np.array(improvements)
+				
+				# Calculate average improvement
+				avg_improvement = np.mean(improvements_array, axis=0)
+				
+				# Calculate percentage of positive improvements
+				positive_count = np.sum(improvements_array > 0, axis=0)
+				positive_percentage = positive_count / success_count * 100
+				
+				print(f"\n{method_name}:")
+				print(f"  Success rate: {success_count}/{successful_cases} cases ({success_count/successful_cases*100:.2f}%)")
+				print(f"  Average improvement: {avg_improvement}")
+				print(f"  Positive improvement rate: {positive_percentage}%")
+			else:
+				print(f"\n{method_name}: No successful runs")
+				
+		# Calculate overall best method
+		method_avg_improvements = {}
+		method_positive_rates = {}
+		for method_name in all_method_names:
+			if method_success_counts[method_name] > 0:
+				improvements = successful_improvements_by_method[method_name]
+				improvements_array = np.array(improvements)
+				method_avg_improvements[method_name] = np.mean(improvements_array)
+				
+				# Calculate percentage of positive improvements
+				positive_count = np.sum(improvements_array > 0, axis=0)
+				positive_percentage = positive_count / method_success_counts[method_name] * 100
+				# Use the average of positive improvement rates across all dimensions
+				method_positive_rates[method_name] = np.mean(positive_percentage)
+		
+		if method_avg_improvements:
+			best_method_avg = max(method_avg_improvements.items(), key=lambda x: x[1])
+			best_method_positive = max(method_positive_rates.items(), key=lambda x: x[1])
+			
+			print("\nBEST PERFORMING METHOD (by average improvement):")
+			print(f"{best_method_avg[0]} with average improvement of {best_method_avg[1]:.4f}")
+			
+			print("\nBEST PERFORMING METHOD (by positive improvement rate):")
+			print(f"{best_method_positive[0]} with positive improvement rate of {best_method_positive[1]:.2f}%")
+		
+		print("\n" + "="*50)
