@@ -20,6 +20,7 @@ def call_gpt(user_prompt, system_prompt = COMMON_SYSTEM_PROMPT, model = 'chatgpt
     
     # Create cache file if it doesn't exist
     if not os.path.exists(cache_file):
+        print(f"Cache file {cache_file} not found. Creating a new empty cache file.")
         with open(cache_file, 'w') as f:
             json.dump({}, f)
     

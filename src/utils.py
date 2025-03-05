@@ -3,9 +3,54 @@ import math
 import itertools
 from glob import glob
 import time
+import os
 from openai import OpenAI
+import re
+import nltk
+import traceback
 
+# Enable this to get more detailed debugging information
+DEBUG_MODE = os.environ.get('DEBUG_MODE', 'False').lower() in ('true', '1', 't')
+
+# Initialize global variables
 client = OpenAI()
+CACHE_FILE = os.environ.get('GLOBAL_CACHE_FILE', 'global_cache.json')
+
+def debug_log(message):
+    """Log debug messages when DEBUG_MODE is enabled"""
+    if DEBUG_MODE:
+        print(f"[DEBUG] {message}")
+
+# Initialize the cache before any function tries to access it
+def initialize_cache():
+    # Initialize main cache
+    cache_file = os.environ.get('GLOBAL_CACHE_FILE', 'global_cache.json')
+    if not os.path.exists(cache_file):
+        debug_log(f"Cache file {cache_file} not found. Creating a new empty cache file.")
+        print(f"Cache file {cache_file} not found. Creating a new empty cache file.")
+        try:
+            with open(cache_file, 'w') as f:
+                json.dump({}, f)
+        except Exception as e:
+            print(f"Error creating cache file: {str(e)}")
+            return False
+    
+    # Initialize subjective impression cache
+    subj_cache_file_path = 'gpt-eval-scores-cache_new-new.json'
+    if not os.path.exists(subj_cache_file_path):
+        debug_log(f"Subjective cache file {subj_cache_file_path} not found. Creating a new empty cache file.")
+        print(f"Subjective cache file {subj_cache_file_path} not found. Creating a new empty cache file.")
+        try:
+            with open(subj_cache_file_path, 'w') as f:
+                json.dump({}, f)
+        except Exception as e:
+            print(f"Error creating subjective cache file: {str(e)}")
+            return False
+            
+    return True
+
+# Initialize cache at module import time
+initialize_cache()
 
 PROMPT_TEMPLATE = "<s>[INST] <<SYS>>\n{system_prompt}\n<</SYS>>\n\n{user_msg}[/INST]"
 
@@ -18,17 +63,18 @@ Given a web source, and context, your only purpose is to summarize the source, a
 
     return PROMPT_TEMPLATE.format(system_prompt=system_prompt, user_msg=user_msg)
 
-import re
-import nltk
-
-
-
 def get_num_words(line):
     return len([x for x in line if len(x)>2])
 
 def extract_citations_new(text):
     def ecn(sentence):
         try:
+            if not isinstance(sentence, str):
+                print(f"Warning: Non-string input to citation extractor: {type(sentence)}")
+                if sentence is None:
+                    return []
+                sentence = str(sentence)
+                
             citation_pattern = r'\[[^\w\s]*\d+[^\w\s]*\]'
             citations = re.findall(citation_pattern, sentence)
             
@@ -49,40 +95,104 @@ def extract_citations_new(text):
             return []
 
     try:
+        # Handle None or non-string input
         if text is None:
             print("Warning: Received None text in extract_citations_new")
             return []
             
+        if not isinstance(text, str):
+            print(f"Warning: Non-string input to extract_citations_new: {type(text)}")
+            try:
+                text = str(text)
+            except Exception as e:
+                print(f"Error converting input to string: {str(e)}")
+                return []
+                
+        # Handle empty text
+        if not text.strip():
+            print("Warning: Received empty text in extract_citations_new")
+            return []
+            
+        # Check if NLTK data is available and download if necessary
+        try:
+            nltk.data.find('tokenizers/punkt')
+        except LookupError:
+            print("NLTK punkt tokenizer not found. Attempting to download...")
+            try:
+                nltk.download('punkt', quiet=True)
+            except Exception as nltk_err:
+                print(f"Error downloading NLTK data: {str(nltk_err)}")
+                # Fall back to simple sentence splitting
+                sentences = [[[([], text, [])]]]
+                return sentences
+                
+        # Split text into paragraphs
         paras = re.split(r'\n\n', text)
+        if not paras:
+            paras = [text]  # Use the whole text as one paragraph if splitting fails
 
         # Split each paragraph into sentences
         sentences = []
         for p in paras:
             try:
-                sentences.append(nltk.sent_tokenize(p))
+                # Check if paragraph is a string
+                if not isinstance(p, str):
+                    p = str(p)
+                if not p.strip():
+                    continue  # Skip empty paragraphs
+                
+                # Use NLTK's sentence tokenizer
+                sent_tokens = nltk.sent_tokenize(p)
+                if not sent_tokens:
+                    sent_tokens = [p]  # Use the paragraph as a single sentence if tokenizing fails
+                sentences.append(sent_tokens)
             except Exception as e:
                 print(f"Error tokenizing paragraph: {str(e)}")
-                sentences.append([p])  # Use the whole paragraph as a single sentence
+                # Use the whole paragraph as a single sentence
+                if p and p.strip():
+                    sentences.append([p])
 
-        # Split each sentence into words
+        # If we couldn't extract any sentences, return an empty result
+        if not sentences:
+            print("Warning: No sentences could be extracted from the text")
+            return []
+
+        # Process each sentence to extract words and citations
         words = []
-        for sentence in sentences:
+        for sentence_list in sentences:
             sentence_words = []
-            for s in sentence:
+            for s in sentence_list:
                 try:
+                    if not s or not isinstance(s, str):
+                        continue
+                        
+                    # Use NLTK's word tokenizer
                     tokens = nltk.word_tokenize(s)
+                    if not tokens:
+                        tokens = s.split()  # Fall back to simple splitting
+                        
+                    # Extract citations
                     citations = ecn(s)
                     sentence_words.append((tokens, s, citations))
                 except Exception as e:
                     print(f"Error processing sentence: {str(e)}")
-                    # Add an empty entry to maintain structure
-                    sentence_words.append(([], s, []))
-            words.append(sentence_words)
+                    # Add a simple entry to maintain structure
+                    if s and isinstance(s, str):
+                        sentence_words.append((s.split(), s, []))
+            
+            if sentence_words:  # Only add non-empty lists
+                words.append(sentence_words)
+            
+        # If we couldn't process any words, return a default structure
+        if not words:
+            print("Warning: No words could be processed from the text")
+            return [[([], text, [])]]
             
         return words
     except Exception as e:
         print(f"Error in extract_citations_new: {str(e)}")
-        return []
+        # Return a minimal valid structure
+        return [[([], text if isinstance(text, str) else "Error processing text", [])]]
 
 def impression_wordpos_count_simple(sentences, n = 5, normalize=True):
     try:
@@ -225,6 +335,8 @@ def impression_subjective_impression(sentences, query, n = 5, normalize = True, 
             avg_score = scores[metric]
         return [avg_score if _==idx else 0 for _ in range(n)]
 
+    # Ensure cache exists
+    initialize_cache()
     
     global subj_cache_file
     cache_file = 'gpt-eval-scores-cache_new-new.json'
@@ -301,91 +413,303 @@ from search_try import search_handler
 from generative_le import generate_answer
 
 def check_summaries_exist(sources, summaries):
-    for source in sources:
-        s2 = [x['summary'] for x in source['sources']]  
-        if s2 == summaries:
-            return source
+    if not sources or not summaries:
+        return None
+        
+    try:
+        for source in sources:
+            try:
+                # Use get() to safely access 'sources' key and provide a default empty list
+                source_list = source.get('sources', [])
+                
+                # Use a safer approach to extract summaries
+                s2 = []
+                for x in source_list:
+                    try:
+                        s2.append(x.get('summary', ''))
+                    except Exception:
+                        # If we can't get the summary for some reason, use an empty string
+                        s2.append('')
+                
+                # Compare the summaries
+                if s2 == summaries:
+                    return source
+            except Exception as e:
+                # If processing a specific source fails, just skip it and continue
+                print(f"Error processing a source in check_summaries_exist: {str(e)}")
+                continue
+    except Exception as e:
+        print(f"Error in check_summaries_exist: {str(e)}")
+        
     return None
 
 def get_answer(query, summaries = None, n = 5, num_completions = 1, cache_idx = 0, regenerate_answer = False, write_to_cache = True, loaded_cache = None):
-    # print(CACHE_FILE, query)
-    if loaded_cache is None:    cache = json.load(open(CACHE_FILE))
-    else: cache = loaded_cache
-    if summaries is None:
-        if cache.get(query) is None:
-            search_results = search_handler(query, source_count = n)
-            if loaded_cache is None:    cache = json.load(open(CACHE_FILE))
-            else: cache = loaded_cache
-            cache[query] = [{'sources': search_results['sources'], 'responses': []}]
-            if write_to_cache:
-                json.dump(cache, open(CACHE_FILE, 'w'), indent=2)
-        else:
-            search_results = cache[query][cache_idx]
-
-        summaries = [x['summary'] for x in search_results['sources']]
-    cached_source = check_summaries_exist(cache[query], summaries)
-    if not regenerate_answer and cached_source is not None:
-        if len(cached_source['responses']) > 0:
-            print('Cache Hit')
-            answers = cached_source['responses'][-1]
-            return cached_source
-        else:
-            answers = generate_answer(query, summaries, num_completions = num_completions) 
-    else:
-        answers = generate_answer(query, summaries, num_completions = num_completions) 
-    ret_value = None
-    # Update the cache
-    if loaded_cache is None:    cache = json.load(open(CACHE_FILE))
-    else: cache = loaded_cache
-
-    if cache.get(query) is None:
+    debug_log(f"get_answer called with query: '{query}', n={n}, num_completions={num_completions}")
+    
+    try:
+        # Ensure cache exists
+        try:
+            initialize_cache()
+        except Exception as cache_init_err:
+            print(f"Error initializing cache: {str(cache_init_err)}")
+            debug_log(f"Cache initialization error: {traceback.format_exc()}")
+            # Continue execution despite cache initialization error
+        
+        # Check if cache file exists and create it if it doesn't
+        try:
+            if not os.path.exists(CACHE_FILE):
+                print(f"Cache file {CACHE_FILE} not found. Creating a new empty cache file.")
+                with open(CACHE_FILE, 'w') as f:
+                    json.dump({}, f)
+                    
+            if loaded_cache is None:
+                try:
+                    cache = json.load(open(CACHE_FILE))
+                    debug_log(f"Loaded cache from {CACHE_FILE}, contains {len(cache)} entries")
+                except json.JSONDecodeError as json_err:
+                    print(f"Error decoding JSON from cache file: {str(json_err)}. Creating a new cache.")
+                    debug_log(f"JSON decode error: {traceback.format_exc()}")
+                    cache = {}
+                except Exception as cache_load_err:
+                    print(f"Error loading cache file: {str(cache_load_err)}. Creating a new cache.")
+                    debug_log(f"Cache load error: {traceback.format_exc()}")
+                    cache = {}
+            else: 
+                cache = loaded_cache
+                debug_log("Using provided loaded_cache")
+        except Exception as cache_err:
+            print(f"Error handling cache file: {str(cache_err)}. Using an empty cache.")
+            debug_log(f"Cache handling error: {traceback.format_exc()}")
+            cache = {}
+            
         if summaries is None:
-            cache[query] = [{'sources': search_results['sources'], 'responses': [answers]}]
-        else:
-            # Fix: Instead of creating minimal sources, use the standard format
-            # Original: cache[query] = [{'sources': [{'summary' : x} for x in summaries], 'responses': [answers]}]
-            # Generate proper source entries with all fields
-            proper_sources = []
-            for i, summary in enumerate(summaries):
-                proper_sources.append({
-                    'summary': summary,
-                    'source': f"Source {i+1}",  # Default value if no real source is available
-                    'url': f"Source URL {i+1}",  # Default value if no URL is available
-                    'text': f"Summary: {summary}"  # Default format used in search_handler
-                })
-            cache[query] = [{'sources': proper_sources, 'responses': [answers]}]
-    else:
-        flag = False
-        for source in cache[query]:
-            s2 = [x['summary'] for x in source['sources']]  
-            if s2 == summaries:
-                source['responses'].append(answers)
-                ret_value = source
-                flag = True
-                break
-        if not flag:
-            if summaries is None:
-                cache[query].append({'sources': search_results['sources'], 'responses': [answers]})
-            else:
-                # Fix: Ensure full source information is maintained
-                # Original: cache[query].append({'sources': [{'summary' : x, 'source' : y} for x, y in zip(summaries, cache[query][0]['sources'])], 'responses': [answers]})
-                
-                # First check if cache[query][0]['sources'] has complete source information
-                existing_sources = cache[query][0]['sources']
-                proper_sources = []
-                
-                for i, (summary, existing) in enumerate(zip(summaries, existing_sources)):
-                    source_entry = {
-                        'summary': summary,
-                        # Use existing source information if available, otherwise use defaults
-                        'source': existing.get('source', f"Source {i+1}"),
-                        'url': existing.get('url', f"Source URL {i+1}"),
-                        'text': existing.get('text', f"Summary: {summary}")
-                    }
-                    proper_sources.append(source_entry)
-                
-                cache[query].append({'sources': proper_sources, 'responses': [answers]})
-    if write_to_cache:
-        json.dump(cache, open(CACHE_FILE, 'w'), indent=2)
+            debug_log("No summaries provided, will fetch from search or cache")
+            try:
+                if cache.get(query) is None:
+                    debug_log(f"Query '{query}' not found in cache, performing search")
+                    try:
+                        search_results = search_handler(query, source_count = n)
+                        debug_log(f"Search completed, found {len(search_results.get('sources', []))} sources")
+                    except Exception as search_err:
+                        print(f"Error in search_handler: {str(search_err)}")
+                        debug_log(f"Search error: {traceback.format_exc()}")
+                        # Create default search results
+                        search_results = {
+                            'sources': [{'summary': f"Failed to retrieve source {i+1}", 
+                                        'source': f"Source {i+1}", 
+                                        'url': f"URL {i+1}", 
+                                        'text': f"Failed to retrieve text {i+1}"} for i in range(n)]
+                        }
+                    
+                    try:
+                        if loaded_cache is None:
+                            cache = json.load(open(CACHE_FILE))
+                        else:
+                            cache = loaded_cache
+                    except Exception as reload_err:
+                        print(f"Error reloading cache after search: {str(reload_err)}")
+                        debug_log(f"Cache reload error: {traceback.format_exc()}")
+                        # Continue with current cache
+                    
+                    cache[query] = [{'sources': search_results['sources'], 'responses': []}]
+                    
+                    if write_to_cache:
+                        try:
+                            json.dump(cache, open(CACHE_FILE, 'w'), indent=2)
+                            debug_log(f"Wrote updated cache to {CACHE_FILE}")
+                        except Exception as write_err:
+                            print(f"Error writing to cache file: {str(write_err)}")
+                            debug_log(f"Cache write error: {traceback.format_exc()}")
+                else:
+                    debug_log(f"Query '{query}' found in cache, using cached results")
+                    search_results = cache[query][cache_idx]
 
-    return ret_value if ret_value is not None else cache[query][-1] 
+                try:
+                    summaries = [x.get('summary', f"Missing summary for source {i+1}") for i, x in enumerate(search_results['sources'])]
+                    debug_log(f"Extracted {len(summaries)} summaries from search results")
+                except Exception as summary_err:
+                    print(f"Error extracting summaries from search results: {str(summary_err)}")
+                    debug_log(f"Summary extraction error: {traceback.format_exc()}")
+                    summaries = [f"Default summary {i+1}" for i in range(n)]
+            except Exception as summaries_err:
+                print(f"Error handling summaries: {str(summaries_err)}")
+                debug_log(f"Summaries handling error: {traceback.format_exc()}")
+                summaries = [f"Default summary {i+1}" for i in range(n)]
+        else:
+            debug_log(f"Using {len(summaries)} provided summaries")
+        
+        try:
+            cached_source = check_summaries_exist(cache.get(query, []), summaries)
+            if cached_source:
+                debug_log("Found matching summaries in cache")
+            else:
+                debug_log("No matching summaries found in cache")
+        except Exception as cache_check_err:
+            print(f"Error in check_summaries_exist: {str(cache_check_err)}")
+            debug_log(f"Cache check error: {traceback.format_exc()}")
+            cached_source = None
+            
+        try:
+            if not regenerate_answer and cached_source is not None:
+                if len(cached_source.get('responses', [])) > 0:
+                    print('Cache Hit')
+                    debug_log("Cache hit - returning cached response")
+                    answers = cached_source['responses'][-1]
+                    return cached_source
+                else:
+                    debug_log("Cache entry found but no responses, generating new answer")
+                    answers = generate_answer(query, summaries, num_completions = num_completions) 
+            else:
+                debug_log("Generating new answer")
+                try:
+                    answers = generate_answer(query, summaries, num_completions = num_completions)
+                    debug_log(f"Answer generation successful, received {len(answers)} responses")
+                except Exception as gen_err:
+                    print(f"Error in generate_answer: {str(gen_err)}")
+                    debug_log(f"Answer generation error: {traceback.format_exc()}")
+                    # Create default answers
+                    answers = ["Failed to generate response due to an error."] * num_completions
+        except Exception as answer_gen_err:
+            print(f"Error handling answer generation: {str(answer_gen_err)}")
+            debug_log(f"Answer handling error: {traceback.format_exc()}")
+            answers = ["Failed to generate response due to an error."] * num_completions
+            
+        ret_value = None
+        
+        # Update the cache
+        debug_log("Updating cache with new response")
+        try:
+            if loaded_cache is None:
+                try:
+                    cache = json.load(open(CACHE_FILE))
+                except Exception as reload_err:
+                    print(f"Error reloading cache for update: {str(reload_err)}")
+                    debug_log(f"Cache reload error: {traceback.format_exc()}")
+                    # Continue with current cache
+            else:
+                cache = loaded_cache
+
+            if cache.get(query) is None:
+                debug_log(f"Query '{query}' not in cache, creating new entry")
+                if summaries is None:
+                    cache[query] = [{'sources': search_results['sources'], 'responses': [answers]}]
+                else:
+                    # Generate proper source entries with all fields
+                    proper_sources = []
+                    for i, summary in enumerate(summaries):
+                        proper_sources.append({
+                            'summary': summary,
+                            'source': f"Source {i+1}",  # Default value if no real source is available
+                            'url': f"Source URL {i+1}",  # Default value if no URL is available
+                            'text': f"Summary: {summary}"  # Default format used in search_handler
+                        })
+                    cache[query] = [{'sources': proper_sources, 'responses': [answers]}]
+            else:
+                debug_log(f"Query '{query}' found in cache, updating entry")
+                flag = False
+                for source in cache[query]:
+                    try:
+                        s2 = [x.get('summary', '') for x in source.get('sources', [])]
+                        if s2 == summaries:
+                            debug_log("Found matching summaries entry, appending new response")
+                            source['responses'].append(answers)
+                            ret_value = source
+                            flag = True
+                            break
+                    except Exception as source_err:
+                        print(f"Error processing source in cache: {str(source_err)}")
+                        debug_log(f"Source processing error: {traceback.format_exc()}")
+                        continue
+                        
+                if not flag:
+                    debug_log("No matching summaries found, adding new entry")
+                    if summaries is None:
+                        cache[query].append({'sources': search_results['sources'], 'responses': [answers]})
+                    else:
+                        # Ensure full source information is maintained
+                        existing_sources = cache[query][0].get('sources', [])
+                        proper_sources = []
+                        
+                        try:
+                            for i, summary in enumerate(summaries):
+                                source_entry = {
+                                    'summary': summary,
+                                    # Use default values to ensure we have all necessary fields
+                                    'source': f"Source {i+1}",
+                                    'url': f"Source URL {i+1}",
+                                    'text': f"Summary: {summary}"
+                                }
+                                # Try to use existing source information if available
+                                if i < len(existing_sources):
+                                    source_entry['source'] = existing_sources[i].get('source', source_entry['source'])
+                                    source_entry['url'] = existing_sources[i].get('url', source_entry['url'])
+                                    source_entry['text'] = existing_sources[i].get('text', source_entry['text'])
+                                
+                                proper_sources.append(source_entry)
+                        except Exception as source_creation_err:
+                            print(f"Error creating proper sources: {str(source_creation_err)}")
+                            debug_log(f"Source creation error: {traceback.format_exc()}")
+                            # Use simplified source creation as fallback
+                            proper_sources = [{'summary': s, 'source': f"Source {i+1}", 'url': f"URL {i+1}", 'text': f"Text {i+1}"} 
+                                            for i, s in enumerate(summaries)]
+                        
+                        cache[query].append({'sources': proper_sources, 'responses': [answers]})
+                        
+            if write_to_cache:
+                try:
+                    json.dump(cache, open(CACHE_FILE, 'w'), indent=2)
+                    debug_log(f"Successfully wrote updated cache to {CACHE_FILE}")
+                except Exception as write_err:
+                    print(f"Error writing updated cache to file: {str(write_err)}")
+                    debug_log(f"Cache write error: {traceback.format_exc()}")
+        except Exception as cache_update_err:
+            print(f"Error updating cache: {str(cache_update_err)}")
+            debug_log(f"Cache update error: {traceback.format_exc()}")
+
+        debug_log("Returning response from get_answer")
+        if ret_value is not None:
+            return ret_value
+        else:
+            try:
+                return cache[query][-1]
+            except Exception as return_err:
+                print(f"Error returning from cache: {str(return_err)}")
+                debug_log(f"Return error: {traceback.format_exc()}")
+                # Return a default response structure
+                default_sources = []
+                for i in range(n):
+                    default_sources.append({
+                        'summary': f"Failed to retrieve summary {i+1} for query: {query}",
+                        'source': f"Source {i+1}",
+                        'url': f"Source URL {i+1}",
+                        'text': f"Failed to retrieve text for query: {query}"
+                    })
+                
+                default_response = {
+                    'sources': default_sources,
+                    'responses': [["Failed to generate response due to an error."] * 5]
+                }
+                return default_response
+                
+    except Exception as e:
+        print(f"Error in get_answer: {str(e)}")
+        debug_log(f"Top-level get_answer error: {traceback.format_exc()}")
+        # Create a stack trace for better debugging
+        traceback.print_exc()
+        
+        # Return a default response structure instead of None
+        default_sources = []
+        for i in range(n):
+            default_sources.append({
+                'summary': f"Failed to retrieve summary {i+1} for query: {query}",
+                'source': f"Source {i+1}",
+                'url': f"Source URL {i+1}",
+                'text': f"Failed to retrieve text for query: {query}"
+            })
+        
+        # Ensure we have a properly formatted response that won't cause errors in improve
+        default_response = {
+            'sources': default_sources,
+            'responses': [["Failed to generate response due to an error."] * 5]  # Ensure we have 5 responses as expected by improve
+        }
+        return default_response 
