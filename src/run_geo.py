@@ -27,7 +27,7 @@ IMPRESSION_FNS = {
 }
 
 
-GEO_METHODS = {
+METHODS = {
 	'identity' : identity,
 	'fluent_gpt' : fluent_optimization_gpt,
 	'unique_words_gpt' : unique_words_optimization_gpt,
@@ -246,7 +246,7 @@ def improve(query : str, idx : int, sources : List[str] = None, summaries : List
 		else:
 			return np.array([]), []
 
-	for meth_name in GEO_METHODS:
+	for meth_name in METHODS:
 		try:
 			# Skip identity method if it's the first one to save time
 			if meth_name == 'identity' and len(improvements) == 0:
@@ -260,7 +260,7 @@ def improve(query : str, idx : int, sources : List[str] = None, summaries : List
 					print(f"Warning: Target summary at index {idx} is empty or too short. Using a default improvement.")
 					optimized_summary = f"Enhanced information about {query} with comprehensive details, examples, and evidence."
 				else:
-					optimized_summary = GEO_METHODS[meth_name](summaries[idx])
+					optimized_summary = METHODS[meth_name](summaries[idx])
 					
 				# Verify the optimization returned something meaningful
 				if not optimized_summary or len(optimized_summary.strip()) < 5:
@@ -486,6 +486,51 @@ if __name__ == '__main__':
 					traceback.print_exc()
 				continue
 		
+		# Calculate summary metrics across all test cases
+		print("\n===== Summary Metrics Across All Test Cases =====")
+		
+		if all_results:
+			# Calculate average improvements across all dimensions
+			all_improvements = np.array([result['improvements'] for result in all_results])
+			avg_improvements = np.mean(all_improvements, axis=0)
+			
+			# Calculate percentage of positive improvements for each method and dimension
+			positive_count = np.sum([np.array(result['positive_improvements']) for result in all_results], axis=0)
+			positive_percentage = (positive_count / len(all_results)) * 100
+			
+			# Calculate overall success rate for the target dimension (sugg_idx)
+			target_success_rate = np.mean([1 if any(result['positive_improvements']) else 0 for result in all_results]) * 100
+			
+			# Display summary metrics
+			print(f"Total test cases processed: {test_count}")
+			print(f"Successfully completed test cases: {successful_cases} ({(successful_cases/test_count)*100:.2f}%)")
+			print(f"Overall success rate for target dimension: {target_success_rate:.2f}%")
+			print("\nAverage improvements by method and dimension:")
+			
+			# Get method names for better reporting
+			method_names = list(METHODS.keys())
+			for i, method_avg in enumerate(avg_improvements):
+				if i < len(method_names):
+					method_name = method_names[i]
+					print(f"  {method_name}: {method_avg}")
+			
+			print("\nPercentage of positive improvements by method:")
+			for i, pos_pct in enumerate(positive_percentage):
+				if i < len(method_names):
+					method_name = method_names[i]
+					print(f"  {method_name}: {pos_pct:.2f}%")
+			
+			# Add summary metrics to the final results
+			summary_metrics = {
+				'avg_improvements': avg_improvements.tolist() if hasattr(avg_improvements, 'tolist') else avg_improvements,
+				'positive_improvement_percentage': positive_percentage.tolist() if hasattr(positive_percentage, 'tolist') else positive_percentage,
+				'target_success_rate': float(target_success_rate),
+				'completion_rate': float((successful_cases/test_count)*100)
+			}
+		else:
+			print("No results to summarize.")
+			summary_metrics = {}
+		
 		# Save final results
 		try:
 			output_file = args.output
@@ -493,7 +538,8 @@ if __name__ == '__main__':
 				json.dump({
 					'results': all_results,
 					'successful_cases': successful_cases,
-					'total_processed': test_count
+					'total_processed': test_count,
+					'summary_metrics': summary_metrics
 				}, f, indent=2)
 			print(f"Results saved to {output_file}")
 		except Exception as save_err:
